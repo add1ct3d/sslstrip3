@@ -16,10 +16,19 @@
 # USA
 #
 
-import logging, re, string, random, zlib, gzip, StringIO
+import logging, re, string, random, zlib, gzip
+from io import StringIO
 
 from twisted.web.http import HTTPClient
-from URLMonitor import URLMonitor
+from sslstrip.URLMonitor import URLMonitor
+from sslstrip.ResponseTampererFactory import ResponseTampererFactory
+from sslstrip.HTMLInjector import HTMLInjector
+
+
+from plugins_manager import ProxyPluginsManager
+from plugins import *
+
+import gzip, inspect, io
 
 class ServerConnection(HTTPClient):
 
@@ -39,16 +48,23 @@ class ServerConnection(HTTPClient):
         self.headers          = headers
         self.client           = client
         self.urlMonitor       = URLMonitor.getInstance()
+        self.responseTamperer = ResponseTampererFactory.getTampererInstance()
+        self.HTMLInjector     = HTMLInjector.getInstance()
+        self.plugins_manager = ProxyPluginsManager.getInstance()
         self.isImageRequest   = False
         self.isCompressed     = False
         self.contentLength    = None
         self.shutdownComplete = False
+        self.plugins = self.plugins_manager.plugins
 
     def getLogLevel(self):
         return logging.DEBUG
 
     def getPostPrefix(self):
         return "POST"
+    
+    def getUrl(self):
+        return self.uri
 
     def sendRequest(self):
         logging.log(self.getLogLevel(), "Sending Request: %s %s"  % (self.command, self.uri))
@@ -80,24 +96,40 @@ class ServerConnection(HTTPClient):
     def handleHeader(self, key, value):
         logging.log(self.getLogLevel(), "Got server header: %s:%s" % (key, value))
 
+        attr ={'function': inspect.stack()[0][3]}
+        self.plugins = self.plugins_manager.plugins
+        for name in self.plugins:
+            try:
+                key, value = self.plugins_manager.hook(name,attr, self.client, key, value)
+            except NotImplementedError:
+                pass
+
+        if (key.decode().lower() == 'content-encoding'):
+            if (value.decode().find('gzip') != -1):
+                self.isCompressed = True
+
         if (key.lower() == 'location'):
             value = self.replaceSecureLinks(value)
+            self.urlMonitor.addRedirection(self.client.uri, value)
+
 
         if (key.lower() == 'content-type'):
             if (value.find('image') != -1):
                 self.isImageRequest = True
                 logging.debug("Response is image content, not scanning...")
 
-        if (key.lower() == 'content-encoding'):
-            if (value.find('gzip') != -1):
-                logging.debug("Response is compressed...")
-                self.isCompressed = True
-        elif (key.lower() == 'content-length'):
-            self.contentLength = value
-        elif (key.lower() == 'set-cookie'):
-            self.client.responseHeaders.addRawHeader(key, value)
-        else:
-            self.client.setHeader(key, value)
+        # if (key.decode().lower() == 'content-encoding'):
+        #     if (value.find('gzip') != -1):
+        #         logging.debug("Response is compressed...")
+        #         self.isCompressed = True
+        # elif (key.decode().lower() == 'content-length'):
+        #     self.contentLength = value
+        # elif (key.lower() == 'set-cookie'):
+        #     self.client.responseHeaders.addRawHeader(key, value)
+
+        
+            
+        self.client.setHeader(key, value)
 
     def handleEndHeaders(self):
        if (self.isImageRequest and self.contentLength != None):
@@ -119,17 +151,53 @@ class ServerConnection(HTTPClient):
             HTTPClient.handleResponseEnd(self)
 
     def handleResponse(self, data):
+
+
+        self.content_type = self.client.responseHeaders.getRawHeaders('content-type')
+
         if (self.isCompressed):
             logging.debug("Decompressing content...")
-            data = gzip.GzipFile('', 'rb', 9, StringIO.StringIO(data)).read()
-            
-        logging.log(self.getLogLevel(), "Read from server:\n" + data)
+            data = gzip.GzipFile('', 'rb', 9, io.BytesIO(data)).read()
+            len_data = len(data)
 
-        data = self.replaceSecureLinks(data)
+        attr ={'function': inspect.stack()[0][3]}
+        for name in self.plugins:
+            try:
+                data = self.plugins_manager.hook(name,attr, self.client , data)
+                len_data = len(data)
+            except NotImplementedError:
+                pass
+        #logging.log(self.getLogLevel(), "Read from server:\n" + data)
 
-        if (self.contentLength != None):
-            self.client.setHeader('Content-Length', len(data))
+        if (self.isCompressed):
+            s = io.BytesIO()
+            g = gzip.GzipFile(fileobj=s, compresslevel=9,mode='w')
+            if (hasattr(data, 'encode')):
+                g.write(data.encode())
+            else:
+                g.write(data)
+            g.close()
+            data = s.getvalue()
+
+        # data = self.replaceSecureLinks(data)
+
+        # # ------ TAMPER ------
+        # if self.responseTamperer:
+        #     data = self.responseTamperer.tamper(self.client.uri, data, self.client.responseHeaders, self.client.getAllHeaders(), self.client.getClientIP())
+        # # ------ TAMPER ------
         
+        # # ------ HTML CODE INJECT ------
+        # if self.HTMLInjector:
+        #     content_type = self.client.responseHeaders.getRawHeaders('content-type')
+
+        #     # only want to inject into text/html pages
+        #     if content_type and content_type[0] == 'text/html':
+        #         #data = self.HTMLInjector.inject(data)
+        #         data = self.HTMLInjector.inject(data, self.client.uri)
+        # # ------ HTML CODE INJECT ------
+        if (self.isCompressed) and (self.content_type != None):
+            self.client.setHeader('Content-Length', str(len_data).encode())
+
         self.client.write(data)
         self.shutdown()
 

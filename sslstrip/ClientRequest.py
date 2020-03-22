@@ -16,7 +16,7 @@
 # USA
 #
 
-import urlparse, logging, os, sys, random
+import logging, os, sys, random
 
 from twisted.web.http import Request
 from twisted.web.http import HTTPChannel
@@ -27,12 +27,12 @@ from twisted.internet import defer
 from twisted.internet import reactor
 from twisted.internet.protocol import ClientFactory
 
-from ServerConnectionFactory import ServerConnectionFactory
-from ServerConnection import ServerConnection
-from SSLServerConnection import SSLServerConnection
-from URLMonitor import URLMonitor
-from CookieCleaner import CookieCleaner
-from DnsCache import DnsCache
+from sslstrip.ServerConnectionFactory import ServerConnectionFactory
+from sslstrip.ServerConnection import ServerConnection
+from sslstrip.SSLServerConnection import SSLServerConnection
+from sslstrip.URLMonitor import URLMonitor
+from sslstrip.CookieCleaner import CookieCleaner
+from sslstrip.DnsCache import DnsCache
 
 class ClientRequest(Request):
 
@@ -65,8 +65,8 @@ class ClientRequest(Request):
         return headers
 
     def getPathFromUri(self):
-        if (self.uri.find("http://") == 0):
-            index = self.uri.find('/', 7)
+        if (self.uri.decode().find("http://") == 0):
+            index = self.uri.decode().find('/', 7)
             return self.uri[index:]
 
         return self.uri        
@@ -91,7 +91,10 @@ class ClientRequest(Request):
 
         self.content.seek(0,0)
         postData          = self.content.read()
-        url               = 'http://' + host + path
+        logging.debug("cookies...")
+        url               = 'http://' + host + path.decode()
+        logging.debug("cookies...")
+        self.uri          = url # set URI to absolute
 
         self.dnsCache.cacheResolution(host, address)
 
